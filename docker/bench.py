@@ -86,7 +86,8 @@ def run(spark, path, label):
         native_ops = plan.count("Transformer")
         results[name] = {"secs": secs, "rows": len(rows), "native_ops": native_ops,
                          "checksum": checksum(rows)}
-        print(f"[{label}] {name}: {secs}s rows={len(rows)} native_ops={native_ops}", flush=True)
+        print(f"[{label}] {name}: {secs}s rows={len(rows)} native_ops={native_ops} "
+              f"checksum={results[name]['checksum']}", flush=True)
     print("RESULT " + json.dumps({"label": label, "results": results}), flush=True)
 
 

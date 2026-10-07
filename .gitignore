@@ -6,3 +6,4 @@
 docker/out/
 poc-results.txt
 __pycache__/
+*.sha512

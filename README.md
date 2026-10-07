@@ -67,6 +67,35 @@ sha512sum -c gluten-velox-bundle-spark3.2.1_2.12-linux_amd64-1.5.0-rhel8.jar.sha
 
 You only need the jar on the **edge/gateway node**, the machine you run `spark3-submit` from. `--jars` ships it to the YARN containers. Nothing needs installing on worker nodes.
 
+### Option A: install from the container image (jar + scripts in one step)
+
+The image [`upendrak/gluten-velox-spark321-cdp`](https://hub.docker.com/r/upendrak/gluten-velox-spark321-cdp) (UBI 8 minimal) carries the jar, the scripts and the benchmark. It doesn't run Spark. It copies the files onto the edge node, and you run them there with the node's own `spark3-submit`, CDP configs and Kerberos ticket.
+
+```bash
+sudo mkdir -p /opt/gluten && sudo chown $USER /opt/gluten
+docker run --rm -v /opt/gluten:/out upendrak/gluten-velox-spark321-cdp:1.5.0-spark3.2.1 install
+#   RHEL 8 with podman instead of docker:
+#   podman run --rm -v /opt/gluten:/out:Z docker.io/upendrak/gluten-velox-spark321-cdp:1.5.0-spark3.2.1 install
+
+kinit <your-principal>                                          # if the cluster uses Kerberos
+/opt/gluten/cluster/run-benchmark.sh hdfs:///tmp/gluten_bench   # same benchmark as the Docker test, on YARN
+```
+
+`run-benchmark.sh` generates TPC-H-like data on HDFS once (default 200 M rows, about 10 GB of Parquet; pass a smaller row count as the 2nd argument), runs the 5 queries on vanilla Spark and on Gluten with the same YARN container size, and prints:
+
+```
+query         vanilla s  gluten s  speedup  native ops  result match
+q1_agg            14.13      8.71    1.62x           9  OK
+...
+TOTAL             68.88     24.65    2.79x
+```
+
+Logs and the summary go to `/opt/gluten/results/<timestamp>/`. Executor count and size: `NUM_EXECUTORS=20 EXECUTOR_CORES=4 ./run-benchmark.sh ...`. Memory comes from `cluster/gluten-velox.conf`.
+
+No Docker or Podman on the edge node? Run the `install` command on any machine and copy the folder over, or use option B.
+
+### Option B: download the files directly
+
 **1. Copy the files to the edge node**
 
 ```bash
@@ -289,8 +318,10 @@ The container needs about 7 GB of RAM. On Docker Desktop, check **Settings → R
 
 ```
 cluster/
-  run-poc.sh            run a job vanilla vs Gluten on YARN, print both times
-  gluten-velox.conf     all Gluten settings (read by run-poc.sh)
+  run-benchmark.sh      the 5-query benchmark on YARN: vanilla vs Gluten, comparison table
+  run-poc.sh            run your own job vanilla vs Gluten on YARN, print both times
+  gluten-velox.conf     all Gluten settings (read by both scripts)
+image/                  UBI 8 distribution image (jar + scripts), see Quick start option A
 examples/
   submit-vanilla.sh     spark3-submit without Gluten
   submit-gluten.sh      spark3-submit with Gluten

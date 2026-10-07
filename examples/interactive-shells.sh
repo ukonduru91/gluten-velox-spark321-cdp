@@ -9,6 +9,9 @@
 # FULL local path of the jar, not just its file name.
 set -euo pipefail
 
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# The jar next to this folder (install layout), else /opt/gluten. Can be an hdfs:// path too.
+GLUTEN_JAR=${GLUTEN_JAR:-$(ls "$ROOT"/gluten-velox-bundle-spark3.2.1_*.jar 2>/dev/null | head -1)}
 GLUTEN_JAR=${GLUTEN_JAR:-/opt/gluten/gluten-velox-bundle-spark3.2.1_2.12-linux_amd64-1.5.0-rhel8.jar}
 CDH_LIB=${CDH_LIB:-/opt/cloudera/parcels/CDH/lib64}
 
