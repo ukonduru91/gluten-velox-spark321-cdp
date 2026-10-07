@@ -1,0 +1,173 @@
+diff --git a/gluten-substrait/src/main/scala/org/apache/gluten/extension/columnar/MiscColumnarRules.scala b/gluten-substrait/src/main/scala/org/apache/gluten/extension/columnar/MiscColumnarRules.scala
+index cb248b7..1ac7077 100644
+--- a/gluten-substrait/src/main/scala/org/apache/gluten/extension/columnar/MiscColumnarRules.scala
++++ b/gluten-substrait/src/main/scala/org/apache/gluten/extension/columnar/MiscColumnarRules.scala
+@@ -19,7 +19,7 @@ package org.apache.gluten.extension.columnar
+ import org.apache.gluten.backendsapi.BackendsApiManager
+ import org.apache.gluten.extension.columnar.transition.{ColumnarToRowLike, Convention, Transitions}
+ import org.apache.gluten.extension.columnar.transition.Convention.BatchType
+-import org.apache.gluten.utils.PlanUtil
++import org.apache.gluten.utils.{PlanUtil, SubqueryTransformUtil}
+ 
+ import org.apache.spark.broadcast.Broadcast
+ import org.apache.spark.rdd.RDD
+@@ -45,7 +45,7 @@ object MiscColumnarRules {
+   // columnar child plan so is always functional.
+   case class RewriteSubqueryBroadcast() extends Rule[SparkPlan] {
+     override def apply(plan: SparkPlan): SparkPlan = {
+-      val out = plan.transformWithSubqueries {
++      val out = SubqueryTransformUtil.transformDownWithSubqueries(plan) {
+         case p =>
+           // Since https://github.com/apache/incubator-gluten/pull/1851.
+           //
+diff --git a/gluten-substrait/src/main/scala/org/apache/gluten/extension/columnar/MergeTwoPhasesHashBaseAggregate.scala b/gluten-substrait/src/main/scala/org/apache/gluten/extension/columnar/MergeTwoPhasesHashBaseAggregate.scala
+index 16d4c0e..15e325e 100644
+--- a/gluten-substrait/src/main/scala/org/apache/gluten/extension/columnar/MergeTwoPhasesHashBaseAggregate.scala
++++ b/gluten-substrait/src/main/scala/org/apache/gluten/extension/columnar/MergeTwoPhasesHashBaseAggregate.scala
+@@ -44,6 +44,10 @@ case class MergeTwoPhasesHashBaseAggregate(session: SparkSession)
+   val replaceSortAggWithHashAgg: Boolean = GlutenConfig.get.forceToUseHashAgg
+   val mergeTwoPhasesAggEnabled: Boolean = GlutenConfig.get.mergeTwoPhasesAggEnabled
+ 
++  // Spark 3.2.0/3.2.1 aggregate execs lack the `isStreaming` field added in 3.2.2.
++  private def isStreaming(agg: BaseAggregateExec): Boolean =
++    agg.logicalLink.exists(_.isStreaming)
++
+   private def isPartialAgg(partialAgg: BaseAggregateExec, finalAgg: BaseAggregateExec): Boolean = {
+     // TODO: now it can not support to merge agg which there are the filters in the aggregate exprs.
+     if (
+@@ -65,15 +69,13 @@ case class MergeTwoPhasesHashBaseAggregate(session: SparkSession)
+     } else {
+       plan.transformDown {
+         case hashAgg @ HashAggregateExec(
+-              _,
+-              isStreaming,
+               _,
+               _,
+               aggregateExpressions,
+               aggregateAttributes,
+               _,
+               resultExpressions,
+-              child: HashAggregateExec) if !isStreaming && isPartialAgg(child, hashAgg) =>
++              child: HashAggregateExec) if !isStreaming(hashAgg) && isPartialAgg(child, hashAgg) =>
+           // convert to complete mode aggregate expressions
+           val completeAggregateExpressions = aggregateExpressions.map(_.copy(mode = Complete))
+           hashAgg.copy(
+@@ -83,8 +85,6 @@ case class MergeTwoPhasesHashBaseAggregate(session: SparkSession)
+             child = child.child
+           )
+         case objectHashAgg @ ObjectHashAggregateExec(
+-              _,
+-              isStreaming,
+               _,
+               _,
+               aggregateExpressions,
+@@ -92,7 +92,7 @@ case class MergeTwoPhasesHashBaseAggregate(session: SparkSession)
+               _,
+               resultExpressions,
+               child: ObjectHashAggregateExec)
+-            if !isStreaming && isPartialAgg(child, objectHashAgg) =>
++            if !isStreaming(objectHashAgg) && isPartialAgg(child, objectHashAgg) =>
+           // convert to complete mode aggregate expressions
+           val completeAggregateExpressions = aggregateExpressions.map(_.copy(mode = Complete))
+           objectHashAgg.copy(
+@@ -103,8 +103,6 @@ case class MergeTwoPhasesHashBaseAggregate(session: SparkSession)
+             child = child.child
+           )
+         case sortAgg @ SortAggregateExec(
+-              _,
+-              isStreaming,
+               _,
+               _,
+               aggregateExpressions,
+@@ -112,7 +110,7 @@ case class MergeTwoPhasesHashBaseAggregate(session: SparkSession)
+               _,
+               resultExpressions,
+               child: SortAggregateExec)
+-            if replaceSortAggWithHashAgg && !isStreaming && isPartialAgg(child, sortAgg) =>
++            if replaceSortAggWithHashAgg && !isStreaming(sortAgg) && isPartialAgg(child, sortAgg) =>
+           // convert to complete mode aggregate expressions
+           val completeAggregateExpressions = aggregateExpressions.map(_.copy(mode = Complete))
+           sortAgg.copy(
+diff --git a/gluten-substrait/src/main/scala/org/apache/spark/sql/hive/HiveTableScanNestedColumnPruning.scala b/gluten-substrait/src/main/scala/org/apache/spark/sql/hive/HiveTableScanNestedColumnPruning.scala
+index b00dc99..063488f 100644
+--- a/gluten-substrait/src/main/scala/org/apache/spark/sql/hive/HiveTableScanNestedColumnPruning.scala
++++ b/gluten-substrait/src/main/scala/org/apache/spark/sql/hive/HiveTableScanNestedColumnPruning.scala
+@@ -119,9 +119,7 @@ object HiveTableScanNestedColumnPruning extends Logging {
+         countLeaves(metadataSchema) > countLeaves(prunedMetadataSchema)
+       ) {
+         val leafNode = leafNodeBuilder(prunedDataSchema, prunedMetadataSchema)
+-        val projectionOverSchema = ProjectionOverSchema(
+-          prunedDataSchema.merge(prunedMetadataSchema),
+-          AttributeSet(relation.output))
++        val projectionOverSchema = ProjectionOverSchema(prunedDataSchema.merge(prunedMetadataSchema))
+         Some(
+           buildNewProjection(
+             projects,
+diff --git a/backends-velox/src/main/scala/org/apache/gluten/extension/BloomFilterMightContainJointRewriteRule.scala b/backends-velox/src/main/scala/org/apache/gluten/extension/BloomFilterMightContainJointRewriteRule.scala
+index 7b209ad..b73bafb 100644
+--- a/backends-velox/src/main/scala/org/apache/gluten/extension/BloomFilterMightContainJointRewriteRule.scala
++++ b/backends-velox/src/main/scala/org/apache/gluten/extension/BloomFilterMightContainJointRewriteRule.scala
+@@ -20,6 +20,7 @@ import org.apache.gluten.config.GlutenConfig
+ import org.apache.gluten.expression.VeloxBloomFilterMightContain
+ import org.apache.gluten.expression.aggregate.VeloxBloomFilterAggregate
+ import org.apache.gluten.sql.shims.SparkShimLoader
++import org.apache.gluten.utils.SubqueryTransformUtil
+ 
+ import org.apache.spark.sql.SparkSession
+ import org.apache.spark.sql.catalyst.rules.Rule
+@@ -30,7 +31,7 @@ case class BloomFilterMightContainJointRewriteRule(spark: SparkSession) extends
+     if (!GlutenConfig.get.enableNativeBloomFilter) {
+       return plan
+     }
+-    val out = plan.transformWithSubqueries {
++    val out = SubqueryTransformUtil.transformDownWithSubqueries(plan) {
+       case p =>
+         applyForNode(p)
+     }
+diff --git a/gluten-substrait/src/main/scala/org/apache/gluten/utils/SubqueryTransformUtil.scala b/gluten-substrait/src/main/scala/org/apache/gluten/utils/SubqueryTransformUtil.scala
+new file mode 100644
+index 0000000..079164b
+--- /dev/null
++++ b/gluten-substrait/src/main/scala/org/apache/gluten/utils/SubqueryTransformUtil.scala
+@@ -0,0 +1,41 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.gluten.utils
++
++import org.apache.spark.sql.catalyst.expressions.PlanExpression
++import org.apache.spark.sql.execution.SparkPlan
++
++object SubqueryTransformUtil {
++
++  /**
++   * Same semantics as Spark 3.2.2+ `QueryPlan.transformWithSubqueries` (pre-order transform that
++   * also descends into subquery plans), built only on APIs present in Spark 3.2.0/3.2.1, which
++   * lack that method.
++   */
++  def transformDownWithSubqueries(plan: SparkPlan)(
++      f: PartialFunction[SparkPlan, SparkPlan]): SparkPlan = {
++    plan.transformDown {
++      case p =>
++        val transformed = f.applyOrElse[SparkPlan, SparkPlan](p, identity)
++        transformed.transformExpressionsDown {
++          case pe: PlanExpression[_] if pe.plan.isInstanceOf[SparkPlan] =>
++            val sub = pe.asInstanceOf[PlanExpression[SparkPlan]]
++            sub.withNewPlan(transformDownWithSubqueries(sub.plan)(f))
++        }
++    }
++  }
++}

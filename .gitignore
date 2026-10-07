@@ -1,0 +1,8 @@
+# The jar is published on the Releases page (too big for git)
+*.jar
+*.tgz
+*.tar.gz
+# Docker test bed output
+docker/out/
+poc-results.txt
+__pycache__/
